@@ -1,134 +1,90 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { exec } from "child_process";
+import { Plugin, TFile } from "obsidian";
+import { promisify } from "util";
 
-// Remember to rename these classes and interfaces!
+const execAsync = promisify(exec);
 
-interface MyPluginSettings {
-	mySetting: string;
-}
-
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
-
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
-
+export default class LocationPlugin extends Plugin {
 	async onload() {
-		await this.loadSettings();
-
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		// 等待布局加载完成后再注册事件监听
+		this.app.workspace.onLayoutReady(() => {
+			this.registerEvent(
+				this.app.vault.on("create", async (file) => {
+					if (file instanceof TFile && file.extension === "md") {
+						console.log("新建文件事件触发");
+						await this.addLocationToNote(file);
+					}
+				})
+			);
 		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+	}
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+	async addLocationToNote(file: TFile) {
+		try {
+			console.log("执行快捷指令获取位置");
+			let retries = 3;
+			let lastError;
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
+			while (retries > 0) {
+				try {
+					const { stdout, stderr } = await execAsync(
+						'echo "{LAT},{LON}" | shortcuts run "Get Location" -i - | tee',
+						{ timeout: 10000 }
+					);
+
+					if (stderr) {
+						console.error("获取位置错误:", stderr);
+						return;
 					}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+					// 读取现有内容
+					const currentContent = await this.app.vault.read(file);
+
+					// 准备新的位置信息
+					const locationData = stdout.trim();
+
+					// 检查是否已有 frontmatter
+					let newContent;
+					if (currentContent.startsWith("---\n")) {
+						// 已有 frontmatter，在其中添加或更新 location
+						const [frontmatter, ...contentParts] =
+							currentContent.split("---\n");
+						const updatedFrontmatter = frontmatter.includes(
+							"location:"
+						)
+							? frontmatter.replace(
+									/location:.*(\r\n|\r|\n)/,
+									`location: "${locationData}"\n`
+							  )
+							: frontmatter + `location: "${locationData}"\n`;
+						newContent = [updatedFrontmatter, ...contentParts].join(
+							"---\n"
+						);
+					} else {
+						// 没有 frontmatter，创建新的
+						newContent = `---\nlocation: "${locationData}"\n---\n${currentContent}`;
+					}
+
+					// 更新文件内容
+					await this.app.vault.modify(file, newContent);
+					return;
+				} catch (error) {
+					lastError = error;
+					retries--;
+					if (retries > 0) {
+						await new Promise((resolve) =>
+							setTimeout(resolve, 1000)
+						);
+						console.log(
+							`重试获取位置信息，剩余尝试次数: ${retries}`
+						);
+					}
 				}
 			}
-		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
-
-	onunload() {
-
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
+			throw lastError;
+		} catch (error) {
+			console.error("执行快捷指令失败:", error);
+		}
 	}
 }
